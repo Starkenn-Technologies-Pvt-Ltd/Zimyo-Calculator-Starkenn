@@ -1,8 +1,10 @@
 (() => {
   const DAY_CELL_SELECTOR = ".row-box-calendar";
   const REQUIRED_HOURS = 9.25;
-  const HALF_DAY_CREDIT = REQUIRED_HOURS / 2;
   const ALLOWED_MONTHLY_DEFICIT = 6.0;
+
+  const LATE_MARK_MIN = 11 * 60;   // 11:00
+  const EARLY_GO_MIN = 17 * 60;    // 17:00
 
   const todayDate = new Date().getDate();
 
@@ -17,13 +19,28 @@
     return diff / 60;
   };
 
-  // ⏱ Fetch live worked time for today
-  const todayTimerText = document.querySelector(
-    ".MuiTypography-root.MuiTypography-h5.MuiTypography-gutterBottom"
-  )?.innerText || "00:00";
+  // ---- XPath helper for today's live time ----
+  const getTextByXPath = (xpath) => {
+    const r = document.evaluate(
+      xpath,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null
+    );
+    return r.singleNodeValue?.innerText || "";
+  };
 
-  const [th, tm] = todayTimerText.replace("hrs", "").trim().split(":").map(Number);
-  const todayWorkedHours = ((th || 0) * 60 + (tm || 0)) / 60;
+  const todayTimerText = getTextByXPath(
+    "/html/body/div[1]/div[2]/div/div/div/div[1]/div/div[3]/div/div[2]/div/div[2]/div[1]/div[2]/div/h5"
+  );
+
+  const todayWorkedHours = (() => {
+    if (!todayTimerText) return 0;
+    const clean = todayTimerText.replace("hrs", "").trim();
+    const [h, m] = clean.split(":").map(Number);
+    return ((h || 0) * 60 + (m || 0)) / 60;
+  })();
 
   const daily = [];
 
@@ -33,79 +50,91 @@
 
     const text = cell.innerText;
 
-    // ❌ Skip week offs
+    // Skip week offs
     if (/Week\s*Off/i.test(text)) return;
 
     let status = "Absent";
+    let remarks = [];
     let hours = 0;
     let start = "-";
     let end = "-";
 
-    // 🎉 Holidays & special full days
-    if (
-      /New Year|Republic Day|Christmas|Office Picnic/i.test(text)
-    ) {
+    // ---- Holidays / Picnic ----
+    if (/New Year|Republic Day|Christmas|Picnic/i.test(text)) {
       status = "Holiday";
       hours = REQUIRED_HOURS;
+      remarks.push("Holiday");
     }
 
-    // 🏖 Any Leave (Personal / Earned / Casual / Medical)
+    // ---- Any Leave ----
     else if (/Leave/i.test(text)) {
       status = "Leave";
       hours = REQUIRED_HOURS;
+      remarks.push("Leave");
     }
 
-    // 🕓 Half Day
-    else if (/Half Day/i.test(text)) {
-      const matches = [...text.matchAll(/(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})/g)];
-      if (matches.length) {
-        const h = diffHours(parseTime(matches[0][1]), parseTime(matches[0][2]));
-        hours = Number((h + HALF_DAY_CREDIT).toFixed(2));
-        start = matches[0][1];
-        end = matches[0][2];
-        status = "Half Day";
-      }
-    }
-
-    // 🧑‍💼 Normal worked day
+    // ---- Work punches ----
     else {
       const matches = [...text.matchAll(/(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})/g)];
+
       if (matches.length) {
-        let max = 0;
+        let maxHrs = 0;
         let best = null;
+
         matches.forEach(m => {
-          const h = diffHours(parseTime(m[1]), parseTime(m[2]));
-          if (h > max) {
-            max = h;
+          const s = parseTime(m[1]);
+          const e = parseTime(m[2]);
+          const h = diffHours(s, e);
+          if (h > maxHrs) {
+            maxHrs = h;
             best = m;
           }
         });
-        hours = Number(max.toFixed(2));
+
+        hours = Number(maxHrs.toFixed(2));
         start = best[1];
         end = best[2];
         status = "Worked";
+
+        const startMin = parseTime(start);
+        const endMin = parseTime(end);
+
+        if (/Half Day/i.test(text)) remarks.push("Half Day Applied");
+        else remarks.push("Regular Day");
+
+        if (startMin > LATE_MARK_MIN) remarks.push("Late Mark");
+        if (endMin < EARLY_GO_MIN) remarks.push("Early Go");
       }
     }
 
-    // 🔴 TODAY override
+    // ---- TODAY override ----
     if (dayNum === todayDate) {
       status = "Today";
       hours = Number(todayWorkedHours.toFixed(2));
+      remarks.push("Live Day");
     }
 
     const delta = Number((hours - REQUIRED_HOURS).toFixed(2));
 
-    daily.push({ day: dayNum, status, start, end, hours, delta });
+    daily.push({
+      day: dayNum,
+      status,
+      start,
+      end,
+      hours,
+      delta,
+      remarks: remarks.join(", ")
+    });
   });
 
   // ===== DAY TABLE =====
   console.table(daily);
 
-  // ===== TILL DATE (EXCLUDING TODAY) =====
+  // ===== TILL DATE (EXCL. TODAY) =====
   const tillDate = daily.filter(d => d.day < todayDate);
-  const expectedTillDate = Number((tillDate.length * REQUIRED_HOURS).toFixed(2));
-  const actualTillDate = Number(tillDate.reduce((s, d) => s + d.hours, 0).toFixed(2));
-  const deficitTillDate = Number((expectedTillDate - actualTillDate).toFixed(2));
+  const expectedTill = Number((tillDate.length * REQUIRED_HOURS).toFixed(2));
+  const actualTill = Number(tillDate.reduce((s, d) => s + d.hours, 0).toFixed(2));
+  const deficitTill = Number((expectedTill - actualTill).toFixed(2));
 
   // ===== MONTHLY =====
   const expectedMonthly = Number((daily.length * REQUIRED_HOURS).toFixed(2));
@@ -114,12 +143,7 @@
 
   // ===== REMAINING =====
   const remainingDays = daily.filter(d => d.day > todayDate).length;
-  const todayRemaining = Number((REQUIRED_HOURS - todayWorkedHours).toFixed(2));
-
-  const remainingHoursNoBuffer = Number(
-    (expectedMonthly - actualMonthly).toFixed(2)
-  );
-
+  const remainingHoursNoBuffer = Number((expectedMonthly - actualMonthly).toFixed(2));
   const remainingHoursWithBuffer = Number(
     Math.max(0, remainingHoursNoBuffer - ALLOWED_MONTHLY_DEFICIT).toFixed(2)
   );
@@ -134,13 +158,13 @@
 
   // ===== OUTPUT =====
   console.log("📅 TILL DATE SUMMARY (Excl. Today)");
-  console.log("Expected Hours:", expectedTillDate);
-  console.log("Actual Hours:", actualTillDate);
-  console.log("Deficit Till Date:", deficitTillDate);
+  console.log("Expected Hours:", expectedTill);
+  console.log("Actual Hours:", actualTill);
+  console.log("Deficit Till Date:", deficitTill);
 
   console.log("\n🕘 TODAY");
   console.log("Worked Today:", todayWorkedHours.toFixed(2));
-  console.log("Remaining Today:", todayRemaining.toFixed(2));
+  console.log("Remaining Today:", Number((REQUIRED_HOURS - todayWorkedHours).toFixed(2)));
 
   console.log("\n📆 MONTHLY SUMMARY");
   console.log("Expected Monthly Hours:", expectedMonthly);
@@ -149,9 +173,7 @@
 
   console.log("\n🚀 REMAINING PLAN");
   console.log("Remaining Working Days:", remainingDays);
-  console.log("Remaining Hours (No Buffer):", remainingHoursNoBuffer);
   console.log("Daily Target (No Buffer):", dailyTargetNoBuffer);
-  console.log("Remaining Hours (With Buffer):", remainingHoursWithBuffer);
   console.log("Daily Target (With Buffer):", dailyTargetWithBuffer);
 
   return { daily };
